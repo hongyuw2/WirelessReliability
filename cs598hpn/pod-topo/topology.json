@@ -12,6 +12,6 @@
         "s2": { "runtime_json" : "pod-topo/s2-runtime.json" }
     },
     "links": [
-        ["h1", "s1-p1", 20], ["s1-p2", "s2-p1"], ["h2", "s2-p2"]
+        ["h1", "s1-p1", "5ms", "100", 10], ["h2", "s1-p2", "50ms", "1000"]
     ]
 }

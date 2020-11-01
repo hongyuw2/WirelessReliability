@@ -102,12 +102,17 @@ class ExerciseTopo(Topo):
                          loss=link['loss'],
                          port2=sw_port)
 
+        # Topology: (client) h1 - s1 - h2 (server)
+        # client - switch: 5ms, 100Mbps
+        # server - switch: 50ms, 1Gbps
+        # Graph: 1. throughput / flow completion time vs. time
+        #        2. throughput / flow completion time vs. loss rate
         for link in switch_links:
             sw1_name, sw1_port = self.parse_switch_node(link['node1'])
             sw2_name, sw2_port = self.parse_switch_node(link['node2'])
             self.addLink(sw1_name, sw2_name,
-                        port1=sw1_port, port2=sw2_port, # x-axis time, y-axis throughput
-                        delay=link['latency'], bw=link['bandwidth'], # 50ms, 1Gbps client-switch:5ms, 100Mbps, (graph: throughput / flow completion time vs loss rate)
+                        port1=sw1_port, port2=sw2_port,
+                        delay=link['latency'], bw=link['bandwidth'],
                         loss=link['loss'])
 
 
@@ -226,12 +231,12 @@ class ExerciseRunner:
                         'bandwidth':None,
                         'loss':0
                         }
-            # if len(link) > 2:
-            #     link_dict['latency'] = self.format_latency(link[2])
-            # if len(link) > 3:
-            #     link_dict['bandwidth'] = link[3]
             if len(link) > 2:
-                link_dict['loss'] = link[2]
+                link_dict['latency'] = self.format_latency(link[2])
+            if len(link) > 3:
+                link_dict['bandwidth'] = link[3]
+            if len(link) > 4:
+                link_dict['loss'] = link[4]
 
             if link_dict['node1'][0] == 'h':
                 assert link_dict['node2'][0] == 's', 'Hosts should be connected to switches, not ' + str(link_dict['node2'])
