@@ -8,10 +8,12 @@
                            "arp -i eth0 -s 10.0.2.20 08:00:00:00:02:00"]}
     },
     "switches": {
-        "s1": { "runtime_json" : "pod-topo/s1-runtime.json" },
-        "s2": { "runtime_json" : "pod-topo/s2-runtime.json" }
+        "s1": { "runtime_json" : "pod-topo/s1-runtime.json",
+		"program" : "build/snoop_download.json" },
+        "s2": { "runtime_json" : "pod-topo/s2-runtime.json",
+		"program" : "build/loss.json" }
     },
     "links": [
-        ["h1", "s1-p1", "5ms", "100", 10], ["h2", "s1-p2", "50ms", "1000"]
+        ["h1", "s1-p1", "5ms"], ["s1-p2", "s2-p1"], ["h2", "s2-p2", "50ms"]
     ]
 }

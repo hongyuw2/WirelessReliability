@@ -12,6 +12,8 @@ P4C_ARGS += --p4runtime-files $(BUILD_DIR)/$(basename $@).p4.p4info.txt
 source = $(wildcard *.p4)
 compiled_json := $(source:.p4=.json)
 
+NO_P4 = 1
+
 ifndef DEFAULT_PROG
 DEFAULT_PROG = $(wildcard *.p4)
 endif
