@@ -5,6 +5,7 @@
 const bit<16> TYPE_IPV4 = 0x800;
 const bit<8>  TYPE_TCP = 6;
 
+#define BLOOM_FILTER_ENTRIES 4096
 #define PAYLOAD_SIZE 5792
 
 /*************************************************************************
@@ -129,6 +130,9 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
+    
+    register<bit<PAYLOAD_SIZE>>(BLOOM_FILTER_ENTRIES) cache_payload;
+    bit<32> reg_pos;
 
     action drop() {
         mark_to_drop(standard_metadata);
@@ -138,6 +142,22 @@ control MyIngress(inout headers hdr,
         standard_metadata.egress_spec = port;
         hdr.ethernet.srcAddr = hdr.ethernet.dstAddr;
         hdr.ethernet.dstAddr = dstAddr;
+        hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
+    }
+
+    action compute_hashes(ip4Addr_t src_ip, ip4Addr_t dst_ip, bit<16> src_port, bit<16> dst_port, bit<32> seqNo) {
+       //Get register position
+       hash(reg_pos, HashAlgorithm.crc16, (bit<32>)0, {src_ip, dst_ip, src_port, dst_port, seqNo}, (bit<32>)BLOOM_FILTER_ENTRIES);
+    }
+
+    action redirect_packet(macAddr_t srcAddr, macAddr_t dstAddr, ip4Addr_t src_ip, ip4Addr_t dst_ip, bit<16> src_port, bit<16> dst_port) {
+        standard_metadata.egress_spec = standard_metadata.ingress_port;
+        hdr.ethernet.srcAddr = srcAddr;
+        hdr.ethernet.dstAddr = dstAddr;
+        hdr.ipv4.srcAddr = src_ip;
+        hdr.ipv4.dstAddr = dst_ip;
+        hdr.tcp.src_port = src_port;
+        hdr.tcp.dst_port = dst_port;
         hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
     }
     
@@ -175,6 +195,26 @@ control MyIngress(inout headers hdr,
                 modify the packet header (ethernet, ipv4, and tcp headers), put the payload, and forward it back to the sender.  
             4. Otherwise, do nothing -- it will just forward the packet using ipv4_forward
             */
+            if (hdr.tcp.isValid()) {
+                // TODO: identify data packet
+                if (hdr.payload.data == 0) { // Check whether this packet is data packet (packet that contains payload)
+                    // TODO: identify SACK
+                    if () {
+                        // Rewrite payload
+                        compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort, hdr.tcp.ackNo);
+                        cache_payload.read(reg_pos, hdr.payload.data);
+
+                        // Fill in addrs and ports
+                        redirect_packet(hdr.ethernet.dstAddr, hdr.ethernet.srcAddr, hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort);
+
+                        // TODO: adjust TCP headers
+                    }
+                }
+                else {
+                    compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort, hdr.tcp.seqNo);
+                    cache_payload.write(reg_pos, hdr.payload.data);
+                }
+            }
             ipv4_lpm.apply();
         }
         debug_table.apply();
@@ -195,12 +235,12 @@ control MyEgress(inout headers hdr,
 *************   C H E C K S U M    C O M P U T A T I O N   **************
 *************************************************************************/
 
-control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
+control MyComputeChecksum(inout headers hdr, inout metadata meta) {
      apply {
-  update_checksum(
-      hdr.ipv4.isValid(),
+        update_checksum(
+            hdr.ipv4.isValid(),
             { hdr.ipv4.version,
-        hdr.ipv4.ihl,
+              hdr.ipv4.ihl,
               hdr.ipv4.diffserv,
               hdr.ipv4.totalLen,
               hdr.ipv4.identification,
@@ -211,6 +251,28 @@ control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
               hdr.ipv4.srcAddr,
               hdr.ipv4.dstAddr },
             hdr.ipv4.hdrChecksum,
+            HashAlgorithm.csum16);
+        
+        // TODO: modify the following TCP checksum calc OR cache TCP checksum
+        update_checksum(
+            hdr.ipv4.isValid(),
+            { ipv4.srcAddr;
+              ipv4.dstAddr;
+              8'0;
+              ipv4.protocol;
+              routing_metadata.tcpLength; // TODO
+              hdr.tcp.srcPort;
+              hdr.tcp.dstPort;
+              hdr.tcp.seqNo;
+              hdr.tcp.ackNo;
+              hdr.tcp.dataOffset,
+              hdr.tcp.res,
+              hdr.tcp.ecn,  // TODO
+              hdr.tcp.ctrl, // TODO
+              hdr.tcp.window,
+              hdr.tcp.urgentPtr,
+              hdr.payload.data },
+            hdr.tcp.checksum,
             HashAlgorithm.csum16);
     }
 }
