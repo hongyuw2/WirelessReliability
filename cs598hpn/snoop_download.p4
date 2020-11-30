@@ -188,7 +188,7 @@ control MyIngress(inout headers hdr,
         raw_ipv4_hdr[127:96]        = hdr.ipv4.srcAddr;
         raw_ipv4_hdr[159:128]       = hdr.ipv4.dstAddr;
 
-        cache_payload.write(reg_pos, raw_ipv4_hdr);
+        cache_ip_hdr.write(reg_pos, raw_ipv4_hdr);
     }
 
     action generate_tcp_hdr() {
@@ -232,7 +232,7 @@ control MyIngress(inout headers hdr,
         raw_tcp_hdr[143:128]    = hdr.tcp.checksum;
         raw_tcp_hdr[159:144]    = hdr.tcp.urgentPtr;
 
-        cache_payload.write(reg_pos, raw_tcp_hdr);
+        cache_tcp_hdr.write(reg_pos, raw_tcp_hdr);
     }
     
     table ipv4_lpm {
@@ -291,7 +291,7 @@ control MyIngress(inout headers hdr,
 
                         generate_ip_hdr();
                         generate_tcp_hdr();
-                        cache_payload.read(reg_pos, hdr.payload.data);
+                        cache_payload.read(hdr.payload.data, reg_pos);
 
                         // Redirect Ethernet addr and out port
                         ipv4_forward(hdr.ethernet.srcAddr, standard_metadata.ingress_port);
