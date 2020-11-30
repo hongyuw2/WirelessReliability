@@ -131,6 +131,8 @@ control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
     
+    register<ipv4_t>(BLOOM_FILTER_ENTRIES) cache_ip_hdr;
+    register<tcp_t>(BLOOM_FILTER_ENTRIES) cache_tcp_hdr;
     register<bit<PAYLOAD_SIZE>>(BLOOM_FILTER_ENTRIES) cache_payload;
     bit<32> reg_pos;
 
@@ -146,19 +148,8 @@ control MyIngress(inout headers hdr,
     }
 
     action compute_hashes(ip4Addr_t src_ip, ip4Addr_t dst_ip, bit<16> src_port, bit<16> dst_port, bit<32> seqNo) {
-       //Get register position
+       // Get register position
        hash(reg_pos, HashAlgorithm.crc16, (bit<32>)0, {src_ip, dst_ip, src_port, dst_port, seqNo}, (bit<32>)BLOOM_FILTER_ENTRIES);
-    }
-
-    action redirect_packet(macAddr_t srcAddr, macAddr_t dstAddr, ip4Addr_t src_ip, ip4Addr_t dst_ip, bit<16> src_port, bit<16> dst_port) {
-        standard_metadata.egress_spec = standard_metadata.ingress_port;
-        hdr.ethernet.srcAddr = srcAddr;
-        hdr.ethernet.dstAddr = dstAddr;
-        hdr.ipv4.srcAddr = src_ip;
-        hdr.ipv4.dstAddr = dst_ip;
-        hdr.tcp.src_port = src_port;
-        hdr.tcp.dst_port = dst_port;
-        hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
     }
     
     table ipv4_lpm {
@@ -183,6 +174,18 @@ control MyIngress(inout headers hdr,
         actions = { NoAction; }
         const default_action = NoAction;
     }
+
+    table ackNo_table {
+        key = {
+            hdr.ipv4.srcAddr: lpm;
+            hdr.ipv4.dstAddr: lpm;
+            hdr.tcp.srcPort: exact;
+            hdr.tcp.dstPort: exact;
+            hdr.tcp.ackNo: exact;
+        }
+        actions = { NoAction; }
+        const default_action = NoAction;
+    }
     
     apply {
         if (hdr.ipv4.isValid()) {
@@ -196,18 +199,18 @@ control MyIngress(inout headers hdr,
             4. Otherwise, do nothing -- it will just forward the packet using ipv4_forward
             */
             if (hdr.tcp.isValid()) {
-                // TODO: identify data packet
-                if (hdr.payload.data == 0) { // Check whether this packet is data packet (packet that contains payload)
-                    // TODO: identify SACK
-                    if () {
-                        // Rewrite payload
+                // Check whether this packet is data packet (packet that contains payload)
+                if (hdr.ipv4.totalLen == hdr.ipv4.ihl + hdr.tcp.dataOffset) { 
+                    // Identify dup ACK
+                    if (ackNo_table.apply().hit) {
+                        // Rewrite payload and headers
                         compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort, hdr.tcp.ackNo);
+                        cache_ip_hdr.read(reg_pos, hdr.ipv4);
+                        cache_tcp_hdr.read(reg_pos, hdr.tcp);
                         cache_payload.read(reg_pos, hdr.payload.data);
 
-                        // Fill in addrs and ports
-                        redirect_packet(hdr.ethernet.dstAddr, hdr.ethernet.srcAddr, hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort);
-
-                        // TODO: adjust TCP headers
+                        // Redirect Ethernet addr and out port
+                        ipv4_forward(hdr.ipv4.srcAddr, standard_metadata.ingress_port);
                     }
                 }
                 else {
@@ -251,28 +254,6 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
               hdr.ipv4.srcAddr,
               hdr.ipv4.dstAddr },
             hdr.ipv4.hdrChecksum,
-            HashAlgorithm.csum16);
-        
-        // TODO: modify the following TCP checksum calc OR cache TCP checksum
-        update_checksum(
-            hdr.ipv4.isValid(),
-            { ipv4.srcAddr;
-              ipv4.dstAddr;
-              8'0;
-              ipv4.protocol;
-              routing_metadata.tcpLength; // TODO
-              hdr.tcp.srcPort;
-              hdr.tcp.dstPort;
-              hdr.tcp.seqNo;
-              hdr.tcp.ackNo;
-              hdr.tcp.dataOffset,
-              hdr.tcp.res,
-              hdr.tcp.ecn,  // TODO
-              hdr.tcp.ctrl, // TODO
-              hdr.tcp.window,
-              hdr.tcp.urgentPtr,
-              hdr.payload.data },
-            hdr.tcp.checksum,
             HashAlgorithm.csum16);
     }
 }
