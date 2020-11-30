@@ -16,6 +16,9 @@ typedef bit<9>  egressSpec_t;
 typedef bit<48> macAddr_t;
 typedef bit<32> ip4Addr_t;
 
+typedef bit<160> raw_ipv4_t;
+typedef bit<160> raw_tcp_t;
+
 header ethernet_t {
     macAddr_t dstAddr;
     macAddr_t srcAddr;
@@ -131,10 +134,12 @@ control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
     
-    register<ipv4_t>(BLOOM_FILTER_ENTRIES) cache_ip_hdr;
-    register<tcp_t>(BLOOM_FILTER_ENTRIES) cache_tcp_hdr;
+    register<raw_ipv4_t>(BLOOM_FILTER_ENTRIES) cache_ip_hdr;
+    register<raw_tcp_t>(BLOOM_FILTER_ENTRIES) cache_tcp_hdr;
     register<bit<PAYLOAD_SIZE>>(BLOOM_FILTER_ENTRIES) cache_payload;
     bit<32> reg_pos;
+    raw_ipv4_t raw_ipv4_hdr;
+    raw_tcp_t raw_tcp_hdr;
 
     action drop() {
         mark_to_drop(standard_metadata);
@@ -150,6 +155,84 @@ control MyIngress(inout headers hdr,
     action compute_hashes(ip4Addr_t src_ip, ip4Addr_t dst_ip, bit<16> src_port, bit<16> dst_port, bit<32> seqNo) {
        // Get register position
        hash(reg_pos, HashAlgorithm.crc16, (bit<32>)0, {src_ip, dst_ip, src_port, dst_port, seqNo}, (bit<32>)BLOOM_FILTER_ENTRIES);
+    }
+
+    action generate_ip_hdr() {
+        cache_ip_hdr.read(raw_ipv4_hdr, reg_pos);
+
+        hdr.ipv4.version            = raw_ipv4_hdr[3:0];
+        hdr.ipv4.ihl                = raw_ipv4_hdr[7:4];
+        hdr.ipv4.diffserv           = raw_ipv4_hdr[15:8];
+        hdr.ipv4.totalLen           = raw_ipv4_hdr[31:16];
+        hdr.ipv4.identification     = raw_ipv4_hdr[47:32];
+        hdr.ipv4.flags              = raw_ipv4_hdr[50:48];
+        hdr.ipv4.fragOffset         = raw_ipv4_hdr[63:51];
+        hdr.ipv4.ttl                = raw_ipv4_hdr[71:64];
+        hdr.ipv4.protocol           = raw_ipv4_hdr[79:72];
+        hdr.ipv4.hdrChecksum        = raw_ipv4_hdr[95:80];
+        hdr.ipv4.srcAddr            = raw_ipv4_hdr[127:96];
+        hdr.ipv4.dstAddr            = raw_ipv4_hdr[159:128];
+    }
+
+    action record_ip_hdr() {
+        raw_ipv4_hdr[3:0]           = hdr.ipv4.version;
+        raw_ipv4_hdr[7:4]           = hdr.ipv4.ihl;
+        raw_ipv4_hdr[15:8]          = hdr.ipv4.diffserv;
+        raw_ipv4_hdr[31:16]         = hdr.ipv4.totalLen;
+        raw_ipv4_hdr[47:32]         = hdr.ipv4.identification;
+        raw_ipv4_hdr[50:48]         = hdr.ipv4.flags;
+        raw_ipv4_hdr[63:51]         = hdr.ipv4.fragOffset;
+        raw_ipv4_hdr[71:64]         = hdr.ipv4.ttl;
+        raw_ipv4_hdr[79:72]         = hdr.ipv4.protocol;
+        raw_ipv4_hdr[95:80]         = hdr.ipv4.hdrChecksum;
+        raw_ipv4_hdr[127:96]        = hdr.ipv4.srcAddr;
+        raw_ipv4_hdr[159:128]       = hdr.ipv4.dstAddr;
+
+        cache_payload.write(reg_pos, raw_ipv4_hdr);
+    }
+
+    action generate_tcp_hdr() {
+        cache_tcp_hdr.read(raw_tcp_hdr, reg_pos);
+
+        hdr.tcp.srcPort     = raw_tcp_hdr[15:0];
+        hdr.tcp.dstPort     = raw_tcp_hdr[31:16];
+        hdr.tcp.seqNo       = raw_tcp_hdr[63:32];
+        hdr.tcp.ackNo       = raw_tcp_hdr[95:64];
+        hdr.tcp.dataOffset  = raw_tcp_hdr[99:96];
+        hdr.tcp.res         = raw_tcp_hdr[103:100];
+        hdr.tcp.cwr         = raw_tcp_hdr[104:104];
+        hdr.tcp.ece         = raw_tcp_hdr[105:105];
+        hdr.tcp.urg         = raw_tcp_hdr[106:106];
+        hdr.tcp.ack         = raw_tcp_hdr[107:107];
+        hdr.tcp.psh         = raw_tcp_hdr[108:108];
+        hdr.tcp.rst         = raw_tcp_hdr[109:109];
+        hdr.tcp.syn         = raw_tcp_hdr[110:110];
+        hdr.tcp.fin         = raw_tcp_hdr[111:111];
+        hdr.tcp.window      = raw_tcp_hdr[127:112];
+        hdr.tcp.checksum    = raw_tcp_hdr[143:128];
+        hdr.tcp.urgentPtr   = raw_tcp_hdr[159:144];
+    }
+
+    action record_tcp_hdr() {
+        raw_tcp_hdr[15:0]       = hdr.tcp.srcPort;
+        raw_tcp_hdr[31:16]      = hdr.tcp.dstPort;
+        raw_tcp_hdr[63:32]      = hdr.tcp.seqNo;
+        raw_tcp_hdr[95:64]      = hdr.tcp.ackNo;
+        raw_tcp_hdr[99:96]      = hdr.tcp.dataOffset;
+        raw_tcp_hdr[103:100]    = hdr.tcp.res;
+        raw_tcp_hdr[104:104]    = hdr.tcp.cwr;
+        raw_tcp_hdr[105:105]    = hdr.tcp.ece;
+        raw_tcp_hdr[106:106]    = hdr.tcp.urg;
+        raw_tcp_hdr[107:107]    = hdr.tcp.ack;
+        raw_tcp_hdr[108:108]    = hdr.tcp.psh;
+        raw_tcp_hdr[109:109]    = hdr.tcp.rst;
+        raw_tcp_hdr[110:110]    = hdr.tcp.syn;
+        raw_tcp_hdr[111:111]    = hdr.tcp.fin;
+        raw_tcp_hdr[127:112]    = hdr.tcp.window;
+        raw_tcp_hdr[143:128]    = hdr.tcp.checksum;
+        raw_tcp_hdr[159:144]    = hdr.tcp.urgentPtr;
+
+        cache_payload.write(reg_pos, raw_tcp_hdr);
     }
     
     table ipv4_lpm {
@@ -177,7 +260,7 @@ control MyIngress(inout headers hdr,
 
     table ackNo_table {
         key = {
-            hdr.ipv4.srcAddr: lpm;
+            // hdr.ipv4.srcAddr: lpm;
             hdr.ipv4.dstAddr: lpm;
             hdr.tcp.srcPort: exact;
             hdr.tcp.dstPort: exact;
@@ -200,22 +283,25 @@ control MyIngress(inout headers hdr,
             */
             if (hdr.tcp.isValid()) {
                 // Check whether this packet is data packet (packet that contains payload)
-                if (hdr.ipv4.totalLen == hdr.ipv4.ihl + hdr.tcp.dataOffset) { 
+                if (hdr.ipv4.totalLen == (bit<16>)(hdr.ipv4.ihl + hdr.tcp.dataOffset)) { 
                     // Identify dup ACK
                     if (ackNo_table.apply().hit) {
                         // Rewrite payload and headers
                         compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort, hdr.tcp.ackNo);
-                        cache_ip_hdr.read(reg_pos, hdr.ipv4);
-                        cache_tcp_hdr.read(reg_pos, hdr.tcp);
+
+                        generate_ip_hdr();
+                        generate_tcp_hdr();
                         cache_payload.read(reg_pos, hdr.payload.data);
 
                         // Redirect Ethernet addr and out port
-                        ipv4_forward(hdr.ipv4.srcAddr, standard_metadata.ingress_port);
+                        ipv4_forward(hdr.ethernet.srcAddr, standard_metadata.ingress_port);
                     }
                 }
                 else {
                     compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort, hdr.tcp.seqNo);
                     cache_payload.write(reg_pos, hdr.payload.data);
+                    record_tcp_hdr();
+                    record_ip_hdr();
                 }
             }
             ipv4_lpm.apply();
