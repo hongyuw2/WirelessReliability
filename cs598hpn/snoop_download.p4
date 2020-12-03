@@ -6,7 +6,10 @@ const bit<16> TYPE_IPV4 = 0x800;
 const bit<8>  TYPE_TCP = 6;
 
 #define BLOOM_FILTER_ENTRIES 4096
-#define PAYLOAD_SIZE 5792
+// Payload size is 1448 bytes (1448 * 8 bits)
+#define PAYLOAD_SIZE 11584
+// Padding is (24 bytes - 1 byte - 1 byte - 4 bytes - 4 bytes) * 8 bits 
+#define OPTION_PADDING 128
 
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
@@ -64,15 +67,22 @@ header payload_t {
     bit<PAYLOAD_SIZE> data;
 }
 
+header tcp_options_t {
+    bit<OPTION_PADDING> padding;
+    bit<32> sack_left_edge;
+    bit<32> sack_right_edge;
+}
 
 struct metadata {
     /* empty */
+    bit<16> tcp_payload_len;
 }
 
 struct headers {
     ethernet_t   ethernet;
     ipv4_t       ipv4;
     tcp_t        tcp;
+    tcp_options_t tcp_opt;
     payload_t    payload;
 }
 
@@ -106,15 +116,23 @@ parser MyParser(packet_in packet,
     }
 
     state parse_tcp {
-       packet.extract(hdr.tcp);
-       transition parse_payload;
+        packet.extract(hdr.tcp);
+        transition select(hdr.ipv4.totalLen) {
+            0x0040: parse_tcp_options;
+            0x05dc: parse_payload; // MTU-sized only
+            default: accept;
+        }
+    }
+
+    state parse_tcp_options {
+        packet.extract(hdr.tcp_opt);
     }
 
     state parse_payload {
         packet.extract(hdr.payload);
         transition accept;
     }
-    
+
 }
 
 /*************************************************************************
@@ -137,9 +155,22 @@ control MyIngress(inout headers hdr,
     register<raw_ipv4_t>(BLOOM_FILTER_ENTRIES) cache_ip_hdr;
     register<raw_tcp_t>(BLOOM_FILTER_ENTRIES) cache_tcp_hdr;
     register<bit<PAYLOAD_SIZE>>(BLOOM_FILTER_ENTRIES) cache_payload;
+    
+    register<bit<32>>(1) last_ack_num;
+    register<bit<32>>(1) last_seq_num;
+    register<bit<PAYLOAD_SIZE>>(1) last_payload;
+    register<raw_ipv4_t>(1) last_ipv4_hdr;
+    register<raw_tcp_t>(1) last_tcp_hdr; 
+
+    bit<32> prev_ack = 0; 
+    bit<32> prev_seq = 0;
+
     bit<32> reg_pos;
     raw_ipv4_t raw_ipv4_hdr;
     raw_tcp_t raw_tcp_hdr;
+    bit<1> dupAck = 0;
+    bit<1> data_packet = 0;
+    bit<PAYLOAD_SIZE> data;
 
     action drop() {
         mark_to_drop(standard_metadata);
@@ -188,7 +219,7 @@ control MyIngress(inout headers hdr,
         raw_ipv4_hdr[127:96]        = hdr.ipv4.srcAddr;
         raw_ipv4_hdr[159:128]       = hdr.ipv4.dstAddr;
 
-        cache_ip_hdr.write(reg_pos, raw_ipv4_hdr);
+        // cache_ip_hdr.write(reg_pos, raw_ipv4_hdr);
     }
 
     action generate_tcp_hdr() {
@@ -235,6 +266,18 @@ control MyIngress(inout headers hdr,
         cache_tcp_hdr.write(reg_pos, raw_tcp_hdr);
     }
     
+     action send_back() {
+        bit<48> tmp;
+
+        /* Swap the MAC addresses */
+        tmp = hdr.ethernet.dstAddr;
+        hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
+        hdr.ethernet.srcAddr = tmp;
+        
+        /* Send the packet back to the port it came from */
+        standard_metadata.egress_spec = standard_metadata.ingress_port;
+    }
+
     table ipv4_lpm {
         key = {
             hdr.ipv4.dstAddr: lpm;
@@ -248,23 +291,22 @@ control MyIngress(inout headers hdr,
         default_action = drop();
     }
 
-    // Table for debugging purpose, just put any data to its key and it will show up on the log file
+    // Table for debugging purpose, just put any data toexi its key and it will show up on the log file
     table debug_table {
         key = {
-            hdr.ipv4.dstAddr: lpm;
-            hdr.tcp.syn: exact;
-        }
-        actions = { NoAction; }
-        const default_action = NoAction;
-    }
-
-    table ackNo_table {
-        key = {
-            // hdr.ipv4.srcAddr: lpm;
-            hdr.ipv4.dstAddr: lpm;
-            hdr.tcp.srcPort: exact;
-            hdr.tcp.dstPort: exact;
-            hdr.tcp.ackNo: exact;
+            hdr.ipv4.srcAddr: exact;
+            hdr.ipv4.dstAddr: exact;
+            hdr.tcp.seqNo : exact;
+            prev_seq : exact;
+            hdr.tcp.ackNo : exact;
+            prev_ack : exact;
+            dupAck: exact;
+            data_packet: exact;
+            hdr.tcp_opt.sack_left_edge: exact;
+            hdr.tcp_opt.sack_right_edge: exact;
+            raw_ipv4_hdr[127:96] : exact;
+            raw_ipv4_hdr[159:128] : exact;
+            hdr.payload.data: exact;
         }
         actions = { NoAction; }
         const default_action = NoAction;
@@ -272,41 +314,52 @@ control MyIngress(inout headers hdr,
     
     apply {
         if (hdr.ipv4.isValid()) {
-            /*
-            1. Check whether this packet is data packet (packet that contains payload)
-            2. If yes, store the payload using the bloom filter and register arrays -> see the firewall implementation. 
-                We can use the hash just like them. Perhaps, the key will be dst_ip, src_ip, dst_port, src_port, and tcp_seq_num.
-            3. If no, check whether this packet is a signal to retransmission (check it's SACK option or duplicate ACKs). 
-                If it is a signal packet, drop this, look at your cache (look at this packet ack number and try to match it with seq number),
-                modify the packet header (ethernet, ipv4, and tcp headers), put the payload, and forward it back to the sender.  
-            4. Otherwise, do nothing -- it will just forward the packet using ipv4_forward
-            */
-            if (hdr.tcp.isValid()) {
+            // Sender -> receiver
+            // Cache data packet
+            if (hdr.ipv4.dstAddr == 0x0a000202 && hdr.tcp.isValid()) { // Only proccess packet to receiver (hardcoded) with IP 10.0.2.2
                 // Check whether this packet is data packet (packet that contains payload)
-                if (hdr.ipv4.totalLen == (bit<16>)(hdr.ipv4.ihl + hdr.tcp.dataOffset)) { 
-                    // Identify dup ACK
-                    if (ackNo_table.apply().hit) {
-                        // Rewrite payload and headers
-                        compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort, hdr.tcp.ackNo);
-
-                        generate_ip_hdr();
-                        generate_tcp_hdr();
-                        cache_payload.read(hdr.payload.data, reg_pos);
-
-                        // Redirect Ethernet addr and out port
-                        ipv4_forward(hdr.ethernet.srcAddr, standard_metadata.ingress_port);
-                    }
+                if (hdr.payload.isValid()) { // Determine whether we should cache packets, packets will be cached only if it is an MTU-sized one
+                    data_packet = 1;
+                    // compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort, hdr.tcp.seqNo);
+                    // cache_payload.write(reg_pos, hdr.payload.data);
+                    // last_payload.write(0, hdr.payload.data);
+                    // record_tcp_hdr();
+                    // record_ip_hdr();
                 }
-                else {
-                    compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort, hdr.tcp.seqNo);
-                    cache_payload.write(reg_pos, hdr.payload.data);
-                    record_tcp_hdr();
-                    record_ip_hdr();
+            } 
+            // Receiver -> Sender
+            // Find duplicate ACK and drop it, and retransmit lost segment 
+            else if (hdr.ipv4.srcAddr == 0x0a000202 && hdr.tcp.isValid()) {
+                // Identify dup ACK
+                last_seq_num.read(prev_seq, 0);
+                last_ack_num.read(prev_ack, 0);
+                if (hdr.tcp.seqNo == prev_seq && hdr.tcp.ackNo == prev_ack) {
+                    dupAck = 1;
+                    // Rewrite payload and headers
+                    // compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort, hdr.tcp.ackNo);
+
+                    // generate_ip_hdr();
+                    // generate_tcp_hdr();
+                    // cache_payload.read(data, reg_pos);
+                    // hdr.payload.data = data;
+
+                    // // Redirect Ethernet addr and out port
+                    // ipv4_forward(hdr.ethernet.srcAddr, standard_metadata.ingress_port);
+                    debug_table.apply();
                 }
+                // Store seq and ack num on the memory
+                last_seq_num.write(0, hdr.tcp.seqNo);
+                last_ack_num.write(0, hdr.tcp.ackNo);
             }
+
+            // Forward the data, maybe not execute it if we want to send it back to the sender (on dup ack case)
             ipv4_lpm.apply();
+            // if (dupAck == 1) {
+            //     send_back();
+            // } else {
+            //     ipv4_lpm.apply();
+            // }
         }
-        debug_table.apply();
     }
 }
 
