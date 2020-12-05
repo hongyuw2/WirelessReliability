@@ -1,7 +1,7 @@
 {
   "target": "bmv2",
-  "p4info": "build/snoop_download.p4.p4info.txt",
-  "bmv2_json": "build/snoop_download.json",
+  "p4info": "build/snoop_p4tcp.p4.p4info.txt",
+  "bmv2_json": "build/snoop_p4tcp.json",
   "table_entries": [
     {
       "table": "MyIngress.ipv4_lpm",
@@ -27,7 +27,7 @@
       },
       "action_name": "MyIngress.ipv4_forward",
       "action_params": {
-        "dstAddr": "08:00:00:00:02:00",
+        "dstAddr": "08:00:00:00:02:22",
         "port": 2
       }
     }

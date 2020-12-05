@@ -17,9 +17,13 @@
 // 1454 bytes = 1000*8 
 #define PAYLOAD_SIZE 8000
 
+#define BLOOM_FILTER_ENTRIES 16
+
 typedef bit<9>  egressSpec_t;
 typedef bit<48> macAddr_t;
 typedef bit<32> ip4Addr_t;
+
+typedef bit<160> raw_ipv4_t;
 
 /*
  * Standard ethernet header 
@@ -143,22 +147,87 @@ control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
     
+    register<bit<32>>(BLOOM_FILTER_ENTRIES) cache_ackNo;
+
+    register<raw_ipv4_t>(BLOOM_FILTER_ENTRIES) cache_ip_hdr;
+    register<bit<PAYLOAD_SIZE>>(BLOOM_FILTER_ENTRIES) cache_payload;
+    
+    register<bit<32>>(1) last_ack_num;
+    register<bit<32>>(1) last_seq_num;
+
+    bit<32> prev_ack = 0; 
+    bit<32> prev_seq = 0;
+
+    bit<32> reg_pos;
+    raw_ipv4_t raw_ipv4_hdr;
+
+    bit<1> dupAck = 0;
+    bit<1> data_packet = 0;
+    bit<32> temp_ackNo;
 
     action drop() {
         mark_to_drop(standard_metadata);
     }
 
-    // action send_back() {
-    //     bit<48> tmp;
+    action compute_hashes(bit<32> seqNo) {
+       // Get register position
+       hash(reg_pos, HashAlgorithm.crc16, (bit<32>)0, {seqNo}, (bit<32>)BLOOM_FILTER_ENTRIES);
+    }
+
+    action generate_ip_hdr() {
+        cache_ip_hdr.read(raw_ipv4_hdr, reg_pos);
+
+        hdr.ipv4.version            = raw_ipv4_hdr[3:0];
+        hdr.ipv4.ihl                = raw_ipv4_hdr[7:4];
+        hdr.ipv4.diffserv           = raw_ipv4_hdr[15:8];
+        hdr.ipv4.totalLen           = raw_ipv4_hdr[31:16];
+        hdr.ipv4.identification     = raw_ipv4_hdr[47:32];
+        hdr.ipv4.flags              = raw_ipv4_hdr[50:48];
+        hdr.ipv4.fragOffset         = raw_ipv4_hdr[63:51];
+        hdr.ipv4.ttl                = raw_ipv4_hdr[71:64];
+        hdr.ipv4.protocol           = raw_ipv4_hdr[79:72];
+        hdr.ipv4.hdrChecksum        = raw_ipv4_hdr[95:80];
+        hdr.ipv4.srcAddr            = raw_ipv4_hdr[127:96];
+        hdr.ipv4.dstAddr            = raw_ipv4_hdr[159:128];
+    }
+
+    action record_ip_hdr() {
+        raw_ipv4_hdr[3:0]           = hdr.ipv4.version;
+        raw_ipv4_hdr[7:4]           = hdr.ipv4.ihl;
+        raw_ipv4_hdr[15:8]          = hdr.ipv4.diffserv;
+        raw_ipv4_hdr[31:16]         = hdr.ipv4.totalLen;
+        raw_ipv4_hdr[47:32]         = hdr.ipv4.identification;
+        raw_ipv4_hdr[50:48]         = hdr.ipv4.flags;
+        raw_ipv4_hdr[63:51]         = hdr.ipv4.fragOffset;
+        raw_ipv4_hdr[71:64]         = hdr.ipv4.ttl;
+        raw_ipv4_hdr[79:72]         = hdr.ipv4.protocol;
+        raw_ipv4_hdr[95:80]         = hdr.ipv4.hdrChecksum;
+        raw_ipv4_hdr[127:96]        = hdr.ipv4.srcAddr;
+        raw_ipv4_hdr[159:128]       = hdr.ipv4.dstAddr;
+
+        cache_ip_hdr.write(reg_pos, raw_ipv4_hdr);
+    }
+
+    action update_tcp_hdr() {
+        hdr.tcp.packetType = 0x44;
+
+        // Swap seqNo and ackNo
+        bit<32> tmp = hdr.tcp.seqNo;
+        hdr.tcp.seqNo = hdr.tcp.ackNo;
+        hdr.tcp.ackNo = tmp;
+    }
+
+    action send_back() {
+        bit<48> tmp;
         
-    //     /* Swap the MAC addresses */
-    //     tmp = hdr.ethernet.dstAddr;
-    //     hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
-    //     hdr.ethernet.srcAddr = tmp;
+        /* Swap the MAC addresses */
+        tmp = hdr.ethernet.dstAddr;
+        hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
+        hdr.ethernet.srcAddr = tmp;
         
-    //     /* Send the packet back to the port it came from */
-    //     standard_metadata.egress_spec = standard_metadata.ingress_port;
-    // }
+        /* Send the packet back to the port it came from */
+        standard_metadata.egress_spec = standard_metadata.ingress_port;
+    }
     
     action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
         standard_metadata.egress_spec = port;
@@ -182,6 +251,7 @@ control MyIngress(inout headers hdr,
 
     table debug_table {
         key = {
+            reg_pos : exact;
             hdr.tcp.packetType : exact;
             hdr.tcp.srcPort : exact;
             hdr.tcp.dstPort : exact;
@@ -196,9 +266,50 @@ control MyIngress(inout headers hdr,
     apply {
         if (hdr.ipv4.isValid()) {
             if (hdr.tcp.isValid()) {
+                // Sender -> receiver
+                // Cache data packet
+                if (hdr.ipv4.dstAddr == 0x0a000202) { // Only proccess packet to receiver (hardcoded) with IP 10.0.2.2
+                    // Check whether this packet is data packet (packet that contains payload)
+                    if (hdr.tcp.packetType == 0x44) {
+                        data_packet = 1;
+                        compute_hashes(hdr.tcp.seqNo);
+
+                        cache_payload.write(reg_pos, hdr.tcp.payload);
+                        cache_ackNo.write(reg_pos, hdr.tcp.seqNo);
+                        record_ip_hdr();
+                    }
+                } 
+                // Receiver -> Sender
+                // Find duplicate ACK and drop it, and retransmit lost segment 
+                else if (hdr.ipv4.srcAddr == 0x0a000202) {
+                    // Identify dup ACK
+                    last_seq_num.read(prev_seq, 0);
+                    last_ack_num.read(prev_ack, 0);
+                    if (hdr.tcp.seqNo == prev_seq && hdr.tcp.ackNo == prev_ack) {
+                        compute_hashes(hdr.tcp.ackNo);
+                        cache_ackNo.read(temp_ackNo, reg_pos);
+                        if (hdr.tcp.ackNo == temp_ackNo) {
+                            dupAck = 1;
+                        }
+                    }
+                    // Store seq and ack num on the memory
+                    last_seq_num.write(0, hdr.tcp.seqNo);
+                    last_ack_num.write(0, hdr.tcp.ackNo);
+                }
                 debug_table.apply();
             }
-            ipv4_lpm.apply();
+            
+            // Forward the data, maybe not execute it if we want to send it back to the sender (on dup ack case)
+            if (dupAck == 1) {
+                // Rewrite payload and headers
+                generate_ip_hdr();
+                update_tcp_hdr();
+                cache_payload.read(hdr.tcp.payload, reg_pos);
+
+                send_back();
+            } else {
+                ipv4_lpm.apply();
+            }
         }
     }
 }
@@ -218,10 +329,10 @@ control MyEgress(inout headers hdr,
 
 control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
      apply {
-    update_checksum(
-        hdr.ipv4.isValid(),
+        update_checksum(
+            hdr.ipv4.isValid(),
             { hdr.ipv4.version,
-          hdr.ipv4.ihl,
+              hdr.ipv4.ihl,
               hdr.ipv4.diffserv,
               hdr.ipv4.totalLen,
               hdr.ipv4.identification,

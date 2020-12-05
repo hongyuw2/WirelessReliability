@@ -232,11 +232,11 @@ class ExerciseRunner:
                         'loss':0
                         }
             if len(link) > 2:
-                link_dict['latency'] = self.format_latency(link[2])
+                link_dict['loss'] = int(link[2])
             if len(link) > 3:
-                link_dict['bandwidth'] = link[3]
+                link_dict['latency'] = self.format_latency(link[3])
             if len(link) > 4:
-                link_dict['loss'] = link[4]
+                link_dict['bandwidth'] = link[4]
 
             if link_dict['node1'][0] == 'h':
                 assert link_dict['node2'][0] == 's', 'Hosts should be connected to switches, not ' + str(link_dict['node2'])
