@@ -1,7 +1,7 @@
 {
   "target": "bmv2",
-  "p4info": "build/snoop_p4tcp.p4.p4info.txt",
-  "bmv2_json": "build/snoop_p4tcp.json",
+  "p4info": "build/snoop_p4tcp_baseline.p4.p4info.txt",
+  "bmv2_json": "build/snoop_p4tcp_baseline.json",
   "table_entries": [
     {
       "table": "MyIngress.ipv4_lpm",

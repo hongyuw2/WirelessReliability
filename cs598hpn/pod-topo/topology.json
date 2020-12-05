@@ -9,9 +9,9 @@
     },
     "switches": {
         "s1": { "runtime_json" : "pod-topo/s1-runtime.json",
-		"program" : "build/snoop_p4tcp.json" }
+		"program" : "build/snoop_p4tcp_baseline.json" }
     },
     "links": [
-        ["h1", "s1-p1", 0, "50ms"], ["h2", "s1-p2", 5, "5ms"]
+        ["h1", "s1-p1", 0, "50ms", 1000], ["h2", "s1-p2", 5, "5ms", 100]
     ]
 }
