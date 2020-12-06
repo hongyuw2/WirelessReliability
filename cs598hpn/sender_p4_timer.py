@@ -45,7 +45,7 @@ def send_packet(seq_no, iface, addr):
     tcp_pkt = P4tcp(dstPort=1234, srcPort=2345, seqNo=seq_no, ackNo=1, dataPayload=message)
     pkt = pkt / IP(dst=addr, proto=P4TCP_PROTOCOL) / tcp_pkt
     sendp(pkt, iface=iface, verbose=False)
-    print_packet_send(tcp_pkt)
+    # print_packet_send(tcp_pkt)
     return tcp_pkt
 
 
@@ -71,6 +71,7 @@ def rto_check(sent_packets, iface, addr):
             # print("Retransmit seq : " + str(seq_no))
             send_packet(seq_no, iface, addr)
             sent_packets[seq_no] = sent_packets[seq_no] + RTO
+            cwnd = INIT_CWND
     lock.release()
 
 def print_packet_receive(tcp_pkt):
@@ -116,6 +117,7 @@ def remove_packet_from_buffer(sent_packets, ack_num):
     for x in keys:
         del sent_packets[x]
     lock.release()
+    return len(keys)
 
 
 # Getting ack packet, and set cwnd
@@ -130,13 +132,14 @@ def ack_thread(addr, iface):
                 ackNum = p4tcp.ackNo
                 if (ackNum > lastAckNo):
                     lastAckNo = ackNum
-                    if (cwnd <= ssthresh): # Slow start phase
-                        cwnd = min(cwnd * 2, MAX_CWND)
-                    else: # Congestion avoidance phase
-                        cwnd = min(cwnd + 1, MAX_CWND)
+                    acked_packets = remove_packet_from_buffer(sent_packets, ackNum)
+                    for i in range (0, acked_packets):
+                        if (cwnd <= ssthresh): # Slow start phase
+                            cwnd = min(cwnd * 2, MAX_CWND)
+                        else: # Congestion avoidance phase
+                            cwnd = min(cwnd + 1, MAX_CWND)
                     dup_ack_counter = 0
-                    remove_packet_from_buffer(sent_packets, ackNum)
-                    # print("Cwnd: %d, unacked_packet: %d" % (cwnd, len(sent_packets)))
+                    print("Cwnd: %d, unacked_packet: %d" % (cwnd, len(sent_packets)))
                 elif (ackNum == lastAckNo): # dupACK
                     # print("Dup ack!")
                     dup_ack_counter = dup_ack_counter + 1
