@@ -43,8 +43,11 @@ def main():
           prn = lambda x: handle_pkt(x, iface))
         
 
-def print_packet(tcp_pkt):
-    print("Packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
+def print_packet_receive(tcp_pkt):
+    print("Received packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
+
+def print_packet_send(tcp_pkt):
+    print("Sent packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
 
 def determine_next_ack(seqs, curr_ack):
     ack = curr_ack
@@ -62,6 +65,7 @@ def handle_pkt(pkt, iface):
     if P4tcp in pkt:
         p4tcp = pkt[P4tcp]
         if (p4tcp.packetType == "D"):
+            # print_packet_receive(p4tcp)
             total_recv_packet = total_recv_packet + 1
             ackNo = 1
             seqNo = p4tcp.seqNo
@@ -72,7 +76,7 @@ def handle_pkt(pkt, iface):
             else:
                 ackNo = latest_ack_no              
             tcp_pkt = P4tcp(dstPort=p4tcp.srcPort, srcPort=1234, packetType="A", seqNo=1, ackNo=ackNo) 
-            print_packet(tcp_pkt)
+            # print_packet_send(tcp_pkt)
             send_pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
             send_pkt = send_pkt / IP(dst=pkt[IP].src, proto=P4TCP_PROTOCOL) / tcp_pkt
             sendp(send_pkt, iface=iface, verbose=False)

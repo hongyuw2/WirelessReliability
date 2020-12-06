@@ -10,6 +10,8 @@ import string
 import threading
 import time
 
+from Queue import PriorityQueue
+
 from scapy.all import sniff, sendp, send, srp1, get_if_hwaddr
 from scapy.all import Packet, hexdump
 from scapy.all import Ether, IP, StrFixedLenField, XByteField, IntField
@@ -18,6 +20,7 @@ import readline
 
 PAYLOAD_LENGTH = 1454
 P4TCP_PROTOCOL = 0x09
+RTO = 0.5
 
 class P4tcp(Packet):
     name = "P4tcp"
@@ -36,12 +39,12 @@ bind_layers(IP, P4tcp, proto=P4TCP_PROTOCOL)
 def randStr(chars = string.ascii_uppercase + string.digits, N=10):
     return ''.join(random.choice(chars) for _ in range(N))
 
-MAX_CWND = 100
+MAX_CWND = 300
 NUM_PACKETS_TO_SEND =  500
 
 # SHARED VAR
-cwnd = 1
-ssthresh = 50
+cwnd = 4
+ssthresh = 300
 currently_sent = 0
 count_sent_packets = 0
 lock = threading.Lock()
@@ -49,9 +52,19 @@ lastAckNo = 0
 dup_ack_counter = 0
 sent_packets = []
 
-def print_packet(tcp_pkt):
-    print("Packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
+def print_packet_receive(tcp_pkt):
+    print("Received packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
 
+def print_packet_send(tcp_pkt):
+    print("Sent packet SEQ= %d, ACK=%d" % (tcp_pkt.seqNo, tcp_pkt.ackNo))
+
+def send_packet(seq_no, iface, addr):
+    pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
+    message = randStr(N=10)
+    tcp_pkt = P4tcp(dstPort=1234, srcPort=2345, seqNo=seq_no, ackNo=1, dataPayload=message)
+    pkt = pkt / IP(dst=addr, proto=P4TCP_PROTOCOL) / tcp_pkt
+    sendp(pkt, iface=iface, verbose=False)
+    return tcp_pkt
 
 # Sending data
 def send_thread(addr, iface):
@@ -59,32 +72,18 @@ def send_thread(addr, iface):
     curr_seq_no = 1
     count_sent_packets = 0
     start_time = time.time()
-    while (count_sent_packets < NUM_PACKETS_TO_SEND):
-        available_to_send = cwnd - currently_sent
-        counter = 0
-        for i in range(0, available_to_send):
-            pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
-            message = randStr(N=10)
-            tcp_pkt = P4tcp(dstPort=1234, srcPort=2345, seqNo=curr_seq_no, ackNo=1, dataPayload=message)
-            pkt = pkt / IP(dst=addr, proto=P4TCP_PROTOCOL) / tcp_pkt
-            sendp(pkt, iface=iface, verbose=False)
-            lock.acquire()
-            sent_packets.append(curr_seq_no)
-            lock.release()
-            # print_packet(tcp_pkt)
+
+    while True:
+        if (currently_sent < cwnd):
+            tcp_pkt = send_packet(curr_seq_no, iface, addr)
             curr_seq_no = curr_seq_no + PAYLOAD_LENGTH
             count_sent_packets = count_sent_packets + 1
-            counter = counter + 1
+            # print("Sent packets = " + str(count_sent_packets))
             if (count_sent_packets >= NUM_PACKETS_TO_SEND):
                 break
-
-        lock.acquire()
-        currently_sent = currently_sent + counter
-        lock.release()
-
-    print("Finish sending all packets!")
-    while(len(sent_packets) > 0):
-        a = 0 # busy waiting
+            lock.acquire()
+            currently_sent = currently_sent + 1
+            lock.release()
 
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -103,6 +102,7 @@ def ack_thread(addr, iface):
         if P4tcp in pkt:
             p4tcp = pkt[P4tcp]
             if (p4tcp.packetType == "A"): # ACK packet
+                # print_packet_receive(p4tcp)
                 ackNum = p4tcp.ackNo
                 if (ackNum > lastAckNo):
                     lastAckNo = ackNum
@@ -110,27 +110,27 @@ def ack_thread(addr, iface):
                         cwnd = min(cwnd * 2, MAX_CWND)
                     else: # Congestion avoidance phase
                         cwnd = min(cwnd + 1, MAX_CWND)
-                    # print("Cwnd: " + str(cwnd))
-                    lock.acquire()
-                    delete_sent_packets(sent_packets, ackNum)
-                    lock.release()
+                    print("Cwnd: " + str(cwnd))
+                    dup_ack_counter = 0
+                    # lock.acquire()
+                    # delete_sent_packets(sent_packets, ackNum)
+                    # lock.release()
                 elif (ackNum == lastAckNo): # dupACK
                     dup_ack_counter = dup_ack_counter + 1
                     if (dup_ack_counter >= 3):
-                        print("Need to retransmit!!")
+                        # print("Need to retransmit!!")
                         # retransmit
                         message = randStr(N=10) # new message is generated
                         pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
                         tcp_pkt = P4tcp(dstPort=1234, srcPort=2345, seqNo=ackNum, ackNo=1, dataPayload=message)
                         pkt = pkt / IP(dst=addr, proto=P4TCP_PROTOCOL) / tcp_pkt
-                        sendp(pkt, iface=iface, verbose=False)
-                        # reduce cwnd - TCP Tahoe: ssthresh = cwnd /2 and set cwnd to 1
-                        # ssthresh = cwnd / 2
-                        # cwnd = 1 
+                        sendp(pkt, iface=iface, verbose=False) 
                         # reduce cwnd - TCP Reno: cwnd = cwnd / 2 and sstresh = cwnd
                         cwnd = max(1, cwnd / 2)
                         ssthresh = cwnd
-                        dup_ack_counter = 0
+                        # lock.acquire()
+                        # currently_sent = currently_sent + 1
+                        # lock.release()
 
                 lock.acquire()
                 currently_sent = currently_sent - 1
