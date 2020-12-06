@@ -12,8 +12,8 @@ plt.xlabel('Loss Rate')
 plt.ylabel('Flow Completion Time (s)')
 plt.xticks(range(len(loss_rates)), loss_rates)
 plt.legend()
-plt.show()
 plt.savefig('loss_rate_comparison.png')
+plt.show()
 
 
 cache_entries = ['1', '10', '50', '100']
@@ -22,5 +22,5 @@ completion_time = [25.89, 19.45, 15.35, 12.44]
 plt.bar(cache_entries, completion_time, width = 0.7)
 plt.xlabel('Number of Cache Entries')
 plt.ylabel('Flow Completion Time (s)')
-plt.show()
 plt.savefig('cache_entry_comparison.png')
+plt.show()
