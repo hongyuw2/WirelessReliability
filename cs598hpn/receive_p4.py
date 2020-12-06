@@ -33,6 +33,7 @@ bind_layers(IP, P4tcp, proto=P4TCP_PROTOCOL)
 total_recv_packet = 0
 latest_ack_no = 1
 received_seqs = []
+stale_seq = 0
 
 def main():
     iface = 'eth0'
@@ -61,7 +62,7 @@ def determine_next_ack(seqs, curr_ack):
     return ack
 
 def handle_pkt(pkt, iface):
-    global total_recv_packet, latest_ack_no
+    global total_recv_packet, latest_ack_no, stale_seq
     if P4tcp in pkt:
         p4tcp = pkt[P4tcp]
         if (p4tcp.packetType == "D"):
@@ -70,18 +71,33 @@ def handle_pkt(pkt, iface):
             ackNo = 1
             seqNo = p4tcp.seqNo
             received_seqs.append(seqNo)
-            if (latest_ack_no == seqNo): # common case
-                ackNo = determine_next_ack(received_seqs, latest_ack_no)
-                latest_ack_no = ackNo
+            if (seqNo >= latest_ack_no):
+                if (latest_ack_no == seqNo): # common case
+                    ackNo = determine_next_ack(received_seqs, latest_ack_no)
+                    latest_ack_no = ackNo
+                else:
+                    ackNo = latest_ack_no              
+                tcp_pkt = P4tcp(dstPort=p4tcp.srcPort, srcPort=1234, packetType="A", seqNo=1, ackNo=ackNo) 
+                # print_packet_send(tcp_pkt)
+                send_pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
+                send_pkt = send_pkt / IP(dst=pkt[IP].src, proto=P4TCP_PROTOCOL) / tcp_pkt
+                sendp(send_pkt, iface=iface, verbose=False)
+                print("Recv seq = %d, sent ack = %d" % (seqNo, ackNo))
             else:
-                ackNo = latest_ack_no              
-            tcp_pkt = P4tcp(dstPort=p4tcp.srcPort, srcPort=1234, packetType="A", seqNo=1, ackNo=ackNo) 
-            # print_packet_send(tcp_pkt)
-            send_pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
-            send_pkt = send_pkt / IP(dst=pkt[IP].src, proto=P4TCP_PROTOCOL) / tcp_pkt
-            sendp(send_pkt, iface=iface, verbose=False)
+                stale_seq = stale_seq + 1
+                if (stale_seq >= 5):
+                    tcp_pkt = P4tcp(dstPort=p4tcp.srcPort, srcPort=1234, packetType="A", seqNo=1, ackNo=latest_ack_no) 
+                    # print_packet_send(tcp_pkt)
+                    send_pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
+                    send_pkt = send_pkt / IP(dst=pkt[IP].src, proto=P4TCP_PROTOCOL) / tcp_pkt
+                    sendp(send_pkt, iface=iface, verbose=False)
+                    print("Stale TCP - Recv seq = %d, sent ack = %d" % (seqNo, latest_ack_no))
+                    stale_seq = 0
+                else:
+                    print("Recv seq = %d, no ack sent" % (seqNo))
             # if (total_recv_packet % 100 == 0):
             #     print("Received packet = " + str(total_recv_packet))
+            # print("Latest ack number : " + str(latest_ack_no))
 
 
 if __name__ == '__main__':
